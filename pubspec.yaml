@@ -1,7 +1,7 @@
 name: kilograpp
 description: "A new Flutter project."
 publish_to: 'none'
-version: 1.0.0+4
+version: 1.0.0+5
 
 environment:
   sdk: ^3.0.0 # Я изменил на 3.0.0, так как 3.9.2 еще не существует (текущая стабильная версия ~3.6). Если у вас спец. версия, верните как было.

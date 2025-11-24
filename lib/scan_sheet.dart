@@ -1,0 +1,727 @@
+import 'dart:async';
+import 'dart:io';
+import 'dart:ui' show ImageFilter;
+
+import 'package:camera/camera.dart';
+import 'package:flutter/material.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'auth_api.dart';
+import 'app_theme.dart';
+
+/* ------------------------- SCAN SHEET (REFACTORED) ------------------------- */
+
+class ScanSheet extends StatefulWidget {
+  /// Тип приема пищи, который будет выбран по умолчанию
+  final String defaultMealType;
+
+  const ScanSheet({
+    super.key,
+    required this.defaultMealType,
+  });
+
+  @override
+  State<ScanSheet> createState() => _ScanSheetState();
+}
+
+class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
+  final _api = AuthApi();
+  CameraController? _controller;
+  Future<void>? _initFuture;
+  bool _busy = false;
+
+  XFile? _frozenPicture;
+  Map<String, dynamic>? _analysisResult;
+  String? _analysisError;
+  bool _isAnalyzing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+
+      if (mounted) {
+
+        setState(() {
+          _initFuture = _initCamera();
+        });
+      }
+    });
+
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+
+
+    _controller?.dispose();
+
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) return;
+    if (state == AppLifecycleState.inactive) {
+      controller.dispose();
+    } else if (state == AppLifecycleState.resumed) {
+      if (_frozenPicture == null) {
+        _initCamera();
+      }
+    }
+  }
+  Future<void> _closeSheet() async {
+    if (!mounted) return;
+
+    setState(() {
+      _busy = true;
+    });
+
+    try {
+      await _controller?.dispose();
+    } catch (e) {
+      print("Ошибка при dispose() камеры: $e");
+    }
+
+    _controller = null;
+
+    if (mounted) {
+      Navigator.pop(context);
+    }
+  }
+
+  Future<void> _initCamera() async {
+    setState(() => _busy = true);
+    try {
+      final cams = await availableCameras();
+      final back = cams.firstWhere(
+            (c) => c.lensDirection == CameraLensDirection.back,
+        orElse: () => cams.first,
+      );
+      final ctrl = CameraController(back, ResolutionPreset.medium, imageFormatGroup: ImageFormatGroup.yuv420, enableAudio: false);
+      await ctrl.initialize();
+      if (!mounted) return;
+      setState(() => _controller = ctrl);
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка камеры: $e')));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _takePictureAndAnalyze() async {
+    if (_controller == null || !_controller!.value.isInitialized || _busy) return;
+    try {
+      setState(() => _busy = true);
+      final file = await _controller!.takePicture();
+
+      // Сразу показываем UI анализа (он покажет скелетон)
+      setState(() {
+        _frozenPicture = file;
+        _isAnalyzing = true;
+        _analysisError = null;
+        _busy = false;
+      });
+
+      try {
+        final result = await _api.analyzeMealPhoto(File(file.path));
+        if (mounted) {
+          setState(() {
+            _analysisResult = result;
+            _isAnalyzing = false;
+          });
+        }
+      } catch (e) {
+        if (mounted) {
+          setState(() {
+            _analysisError = e.toString();
+            _isAnalyzing = false;
+          });
+        }
+      }
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не удалось сделать снимок: $e')));
+      setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _handleSave(String mealType, Map<String, dynamic> analysisData) async {
+    setState(() => _busy = true);
+
+    try {
+      await _api.logMeal(
+        mealType: mealType,
+        name: analysisData['name']?.toString() ?? 'Блюдо',
+        calories: (analysisData['calories'] as num?)?.toInt() ?? 0,
+        protein: (analysisData['protein'] as num?)?.toDouble() ?? 0.0,
+        fat: (analysisData['fat'] as num?)?.toDouble() ?? 0.0,
+        carbs: (analysisData['carbs'] as num?)?.toDouble() ?? 0.0,
+        // Передаем анализ GPT
+        analysis: analysisData['analysis']?.toString(),
+      );
+      if (mounted) {
+        // Успех! Возвращаем true, KiloShell обновится
+        Navigator.pop(context, true);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ошибка сохранения: $e'), backgroundColor: AppColors.red),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
+  }
+
+  void _resetScanner() {
+    setState(() {
+      _frozenPicture = null;
+      _analysisResult = null;
+      _isAnalyzing = false;
+      _analysisError = null;
+    });
+    if (_controller == null) {
+      _initFuture = _initCamera();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final safe = MediaQuery.of(context).padding;
+    return Column(
+      children: [
+        SizedBox(height: safe.top),
+        // --- ОБЩИЙ APPBAR ---
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+          child: Row(
+            children: [
+              IconButton(
+                  onPressed: _busy ? null : () {
+                    if (_frozenPicture != null) {
+                      _resetScanner(); // Кнопка "Назад" на экране анализа
+                    } else {
+                      _closeSheet(); // Кнопка "Закрыть" на камере (теперь с await)
+                    }
+                  },
+                  icon: Icon(_frozenPicture != null ? Icons.arrow_back_rounded : Icons.close_rounded, color: Colors.white)),
+              const SizedBox(width: 8),
+              Text(
+                _frozenPicture == null ? 'Сканирование блюда' : 'Результат анализа',
+                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 18),
+              ),
+              const Spacer(),
+              if (_frozenPicture == null)
+                IconButton(onPressed: () => _controller?.setFlashMode(FlashMode.torch), icon: const Icon(Icons.flashlight_on_rounded, color: Colors.white), tooltip: 'Фонарик'),
+            ],
+          ),
+        ),
+        Expanded(
+          child: FutureBuilder(
+            future: _initFuture,
+            builder: (context, snapshot) {
+              // Показываем индикатор, если:
+              // 1. Future еще не был назначен (он null)
+              // 2. Future был назначен, но еще не завершился
+              final bool isLoading = _initFuture == null ||
+                  (snapshot.connectionState != ConnectionState.done);
+
+              if (isLoading && _frozenPicture == null) {
+                return const Center(child: CircularProgressIndicator());
+              }
+
+              return AnimatedSwitcher(
+                duration: const Duration(milliseconds: 400),
+                transitionBuilder: (child, animation) {
+                  return FadeTransition(opacity: animation, child: child);
+                },
+                child: _frozenPicture == null
+                    ? _buildCameraView() // ЭКРАН 1: КАМЕРА
+                    : _buildAnalysisView(), // ЭКРАН 2: РЕЗУЛЬТАТ
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// ЭКРАН 1: Виджет Камеры
+  Widget _buildCameraView() {
+    return Stack(
+      key: const ValueKey('camera_view'),
+      fit: StackFit.expand,
+      children: [
+        if (_controller?.value.isInitialized ?? false)
+          Container(
+            color: Colors.black,
+            width: double.infinity,
+            height: double.infinity,
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final ps = _controller!.value.previewSize!;
+                final previewW = ps.height;
+                final previewH = ps.width;
+                return FittedBox(
+                  fit: BoxFit.cover,
+                  child: SizedBox(width: previewW, height: previewH, child: CameraPreview(_controller!)),
+                );
+              },
+            ),
+          )
+        else
+          const Center(child: Text('Камера не инициализирована', style: TextStyle(color: Colors.white))),
+
+        // Оверлей (квадрат)
+        const IgnorePointer(child: CustomPaint(painter: _OverlayPainter())),
+        // Кнопка "Сканировать"
+        _buildShutterButton(),
+      ],
+    );
+  }
+
+  /// ЭКРАН 2: Виджет Результатов Анализа
+  Widget _buildAnalysisView() {
+    return Stack(
+      key: const ValueKey('analysis_view'),
+      fit: StackFit.expand,
+      children: [
+        // "Замороженное" фото на размытом фоне
+        Image.file(File(_frozenPicture!.path), fit: BoxFit.cover, width: double.infinity, height: double.infinity),
+        BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+          child: Container(color: Colors.black.withOpacity(0.5)),
+        ),
+        // Оверлей с анализом (НОВЫЙ ВИДЖЕТ)
+        _AnalysisResultOverlay(
+          isAnalyzing: _isAnalyzing,
+          analysisResult: _analysisResult,
+          error: _analysisError,
+          defaultMealType: widget.defaultMealType,
+          isLoading: _busy, // Передаем состояние загрузки
+          onSave: (selectedMealType) {
+            // Кнопка "Сохранить" нажата
+            if (_analysisResult != null) {
+              _handleSave(selectedMealType, _analysisResult!);
+            }
+          },
+          onCancel: _resetScanner, // Кнопка "Отмена"
+        ),
+      ],
+    );
+  }
+
+
+
+  Widget _buildShutterButton() {
+    return Align(
+      alignment: Alignment.bottomCenter,
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(16, 0, 16, 16 + MediaQuery.of(context).padding.bottom),
+        child: Row(
+          children: [
+            Expanded(
+              child: ElevatedButton.icon(
+                onPressed: _busy || !(_controller?.value.isInitialized ?? false) ? null : _takePictureAndAnalyze,
+                icon: _busy ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.camera_alt_rounded),
+                label: Text(_busy ? 'Обработка...' : 'Сканировать'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.primary,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/* ------------------------- НОВЫЙ REFACTORED OVERLAY ------------------------- */
+
+
+class _AnalysisResultOverlay extends StatefulWidget {
+  final bool isAnalyzing;
+  final Map<String, dynamic>? analysisResult;
+  final String? error;
+  final String defaultMealType;
+  final bool isLoading; // Внешний индикатор загрузки (для сохранения)
+  final Function(String mealType) onSave; // Функция сохранения
+  final VoidCallback onCancel; // Функция отмены
+
+  const _AnalysisResultOverlay({
+    required this.isAnalyzing,
+    required this.analysisResult,
+    required this.error,
+    required this.defaultMealType,
+    required this.isLoading,
+    required this.onSave,
+    required this.onCancel,
+  });
+
+  @override
+  State<_AnalysisResultOverlay> createState() => _AnalysisResultOverlayState();
+}
+
+class _AnalysisResultOverlayState extends State<_AnalysisResultOverlay> with SingleTickerProviderStateMixin {
+  late String _selectedMealType;
+  late final AnimationController _animationController;
+  late final Animation<double> _fadeAnimation;
+  late final Animation<double> _scaleAnimation;
+
+  final Map<String, String> _mealTypes = const {
+    'breakfast': 'Завтрак',
+    'lunch': 'Обед',
+    'dinner': 'Ужин',
+    'snack': 'Перекус',
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedMealType = widget.defaultMealType;
+
+    _animationController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 500),
+    );
+
+    _fadeAnimation = CurvedAnimation(
+      parent: _animationController,
+      curve: Curves.easeOutCubic,
+    );
+    _scaleAnimation = CurvedAnimation(
+      parent: _animationController,
+      curve: Curves.elasticOut, // Эффект "пружины"
+    );
+
+    // Запускаем анимацию, как только виджет готов
+    // (Небольшая задержка, чтобы фон успел размыться)
+    Timer(const Duration(milliseconds: 100), () {
+      if (mounted) {
+        _animationController.forward();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _animationController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Обертка для анимации
+    return ScaleTransition(
+      scale: _scaleAnimation,
+      child: FadeTransition(
+        opacity: _fadeAnimation,
+        // SingleChildScrollView, чтобы контент не вылезал при показе клавиатуры (если бы она была)
+        // и для длинного текста GPT
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              SizedBox(height: MediaQuery.of(context).size.height * 0.1), // Отступ сверху
+              // Центральный блок (Индикатор / Ошибка / Результат)
+              _buildCentralContent(),
+              const SizedBox(height: 24),
+              // Нижние кнопки (Сохранить / Отмена)
+              _buildActionButtons(),
+              SizedBox(height: MediaQuery.of(context).padding.bottom),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Рендерит центральную карточку
+  Widget _buildCentralContent() {
+    if (widget.isAnalyzing) {
+      return KiloCard(
+        child: Column(
+          children: [
+            Skeleton(height: 40, width: double.infinity, radius: 0),
+            Padding(
+              padding: const EdgeInsets.all(20.0),
+              child: Column(
+                children: [
+                  const SizedBox(height: 12),
+                  Skeleton(height: 36, width: 120, radius: 18),
+                  const SizedBox(height: 24),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceAround,
+                    children: const [
+                      Skeleton(height: 40, width: 60, radius: 8),
+                      Skeleton(height: 40, width: 60, radius: 8),
+                      Skeleton(height: 40, width: 60, radius: 8),
+                    ],
+                  ),
+                  const SizedBox(height: 24),
+                  Skeleton(height: 16, width: double.infinity, radius: 4),
+                  const SizedBox(height: 8),
+                  Skeleton(height: 16, width: 180, radius: 4),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (widget.error != null) {
+      // --- КАРТОЧКА ОШИБКИ ---
+      return KiloCard(
+        color: AppColors.red.withOpacity(0.1),
+        borderColor: AppColors.red.withOpacity(0.3),
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          children: const [
+            Icon(Icons.error_outline_rounded, color: AppColors.red, size: 56),
+            SizedBox(height: 16),
+            Text('Ошибка анализа', style: TextStyle(color: AppColors.neutral900, fontSize: 20, fontWeight: FontWeight.w700)),
+            SizedBox(height: 8),
+            Text(
+              'Не удалось распознать блюдо. Попробуйте фото с лучшим освещением или другим ракурсом.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: AppColors.neutral600, fontSize: 14),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (widget.analysisResult != null) {
+      final data = widget.analysisResult!;
+      final name = data['name']?.toString() ?? 'Блюдо';
+      final calories = data['calories']?.toString() ?? '0';
+      final protein = data['protein']?.toStringAsFixed(1) ?? '0.0';
+      final fat = data['fat']?.toStringAsFixed(1) ?? '0.0';
+      final carbs = data['carbs']?.toStringAsFixed(1) ?? '0.0';
+
+      final String gptAnalysis = data['analysis']?.toString() ?? 'Анализ не предоставлен.';
+      final String gptVerdict = data['verdict']?.toString() ?? 'Вердикт не предоставлен.';
+
+      return KiloCard(
+        padding: EdgeInsets.zero, // Убираем padding, т.к. KiloCard его добавляет
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // 1. Название и Калории
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
+              child: Column(
+                children: [
+                  Text(
+                    name,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: AppColors.neutral900, fontSize: 22, fontWeight: FontWeight.w900),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    '$calories ккал',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: AppColors.primary, fontSize: 36, fontWeight: FontWeight.w900),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1, color: AppColors.neutral200),
+            // 2. БЖУ
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 16.0),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: [
+                  _buildMacroStat('Белки', protein, AppColors.primary),
+                  _buildMacroStat('Жиры', fat, AppColors.secondary),
+                  _buildMacroStat('Углеводы', carbs, AppColors.neutral500),
+                ],
+              ),
+            ),
+            Container(
+              color: AppColors.neutral50,
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Анализ Sola AI:', style: TextStyle(fontWeight: FontWeight.bold, color: AppColors.neutral700)),
+                  const SizedBox(height: 8),
+                  Text(gptAnalysis, style: const TextStyle(color: AppColors.neutral600, height: 1.4)),
+                  const SizedBox(height: 12),
+                  const Text('Вердикт:', style: TextStyle(fontWeight: FontWeight.bold, color: AppColors.neutral700)),
+                  const SizedBox(height: 8),
+                  Text(gptVerdict, style: const TextStyle(color: AppColors.neutral600, height: 1.4, fontStyle: FontStyle.italic)),
+                ],
+              ),
+            ),
+            const Divider(height: 1, color: AppColors.neutral200),
+            // 4. Селектор приема пищи
+            Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Сохранить как:', style: TextStyle(fontWeight: FontWeight.bold, color: AppColors.neutral700)),
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ToggleButtons(
+                      isSelected: _mealTypes.keys.map((key) => key == _selectedMealType).toList(),
+                      onPressed: (index) {
+                        setState(() {
+                          _selectedMealType = _mealTypes.keys.elementAt(index);
+                        });
+                      },
+                      borderRadius: BorderRadius.circular(12.0),
+                      selectedBorderColor: AppColors.primary,
+                      selectedColor: Colors.white,
+                      fillColor: AppColors.primary,
+                      color: AppColors.primary,
+                      constraints: const BoxConstraints(minHeight: 40.0),
+                      children: _mealTypes.values.map((label) => Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                        child: Text(label, style: const TextStyle(fontWeight: FontWeight.w600)),
+                      )).toList(),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Container();
+  }
+
+
+
+  /// Рендерит кнопки "Отмена" и "Сохранить"
+  Widget _buildActionButtons() {
+    // Если анализ еще идет или ошибка - кнопок нет
+    if (widget.isAnalyzing || widget.error != null) {
+      // Показываем только кнопку "Попробовать снова"
+      if (widget.error != null) {
+        return SizedBox(
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            onPressed: widget.onCancel,
+            icon: const Icon(Icons.refresh_rounded),
+            label: const Text('Попробовать снова'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Colors.white,
+              side: const BorderSide(color: Colors.white54),
+              padding: const EdgeInsets.symmetric(vertical: 12),
+            ),
+          ),
+        );
+      }
+      return const SizedBox.shrink();
+    }
+
+    // Рендерим кнопки, если все ОК
+    return Row(
+      children: [
+        Expanded(
+          child: OutlinedButton.icon(
+            onPressed: widget.isLoading ? null : widget.onCancel,
+            icon: const Icon(Icons.close_rounded),
+            label: const Text('Отмена'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Colors.white,
+              side: const BorderSide(color: Colors.white54),
+              padding: const EdgeInsets.symmetric(vertical: 12),
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: ElevatedButton.icon(
+            onPressed: widget.isLoading ? null : () => widget.onSave(_selectedMealType),
+            icon: widget.isLoading
+                ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                : const Icon(Icons.check_rounded),
+            label: Text(widget.isLoading ? 'Сохраняю...' : 'Сохранить'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.primary,
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(vertical: 12),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMacroStat(String label, String value, Color color) {
+    return Column(
+      children: [
+        Text(label, style: const TextStyle(color: AppColors.neutral600, fontSize: 13, fontWeight: FontWeight.w500)),
+        const SizedBox(height: 4),
+        Text(
+          '${value}г',
+          style: TextStyle(color: color, fontSize: 20, fontWeight: FontWeight.w800),
+        ),
+      ],
+    );
+  }
+}
+
+
+class _OverlayPainter extends CustomPainter {
+  const _OverlayPainter();
+  @override
+  void paint(Canvas canvas, Size size) {
+    final overlay = Paint()..color = Colors.black.withOpacity(0.45);
+    final clear = Paint()..blendMode = BlendMode.clear;
+    final stroke = Paint()
+      ..color = Colors.white.withOpacity(0.95)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3;
+    final width = size.width * 0.8;
+    // Квадратный фокус
+    final height = width;
+    final left = (size.width - width) / 2;
+    final top = (size.height - height) / 2 - 24;
+    final rrect = RRect.fromRectAndRadius(
+      Rect.fromLTWH(left, top, width, height),
+      const Radius.circular(16),
+    );
+    final layerBounds = Offset.zero & size;
+    canvas.saveLayer(layerBounds, Paint());
+    canvas.drawRect(layerBounds, overlay);
+    canvas.drawRRect(rrect, clear);
+    canvas.restore();
+    canvas.drawRRect(rrect, stroke);
+    final mark = Paint()
+      ..color = Colors.white
+      ..strokeWidth = 4
+      ..style = PaintingStyle.stroke;
+    const len = 18.0;
+    canvas.drawLine(Offset(left, top), Offset(left + len, top), mark);
+    canvas.drawLine(Offset(left, top), Offset(left, top + len), mark);
+    canvas.drawLine(Offset(left + width, top), Offset(left + width - len, top), mark);
+    canvas.drawLine(Offset(left + width, top), Offset(left + width, top + len), mark);
+    canvas.drawLine(Offset(left, top + height), Offset(left + len, top + height), mark);
+    canvas.drawLine(Offset(left, top + height), Offset(left, top + height - len), mark);
+    canvas.drawLine(Offset(left + width, top + height), Offset(left + width - len, top + height), mark);
+    canvas.drawLine(Offset(left + width, top + height), Offset(left + width, top + height - len), mark);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}

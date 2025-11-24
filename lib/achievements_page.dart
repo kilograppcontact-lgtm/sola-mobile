@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'auth_api.dart';
 import 'app_theme.dart'; // Убедитесь, что пути верные
-import 'index.dart'; // Для KiloCard, Skeleton
+import 'main.dart'; // Для KiloCard, Skeleton
 
 class AchievementsPage extends StatefulWidget {
   const AchievementsPage({super.key});

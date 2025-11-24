@@ -8,7 +8,7 @@ import 'package:dio/dio.dart';
 
 import 'app_theme.dart';
 import 'auth_api.dart';
-import 'index.dart';
+import 'main.dart';
 import 'purchase_page.dart';
 
 

@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'app_theme.dart';
-import 'index.dart'; // Для KiloCard
+import 'main.dart'; // Для KiloCard
 import 'sola_ai.dart'; // Для перехода к чату
 
 class AiInstructionsPage extends StatelessWidget {

@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:google_sign_in/google_sign_in.dart'; // <-- ДОБАВЛЕНО
-import 'index.dart';
+import 'main.dart';
 import 'app_theme.dart';
 import 'auth_api.dart';
 import 'package:dio/dio.dart';

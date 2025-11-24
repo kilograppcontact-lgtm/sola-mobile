@@ -4,7 +4,7 @@ import 'package:table_calendar/table_calendar.dart';
 import 'package:url_launcher/url_launcher.dart'; // ОБЯЗАТЕЛЬНО ДОБАВИТЬ В pubspec.yaml
 import 'ai_workout_page.dart'; // <-- ИМПОРТ СТРАНИЦЫ С КАМЕРОЙ
 import 'auth_api.dart';
-import 'index.dart'; // Для AppColors, KiloCard и т.д.
+import 'main.dart'; // Для AppColors, KiloCard и т.д.
 import 'app_theme.dart'; // Для AppColors
 import 'purchase_page.dart';
 

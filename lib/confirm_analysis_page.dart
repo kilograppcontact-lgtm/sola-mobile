@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'; // Для TextInputFormatters
 import 'auth_api.dart';
-import 'index.dart'; // Для KiloCard, SectionTitle и т.д.
+import 'main.dart'; // Для KiloCard, SectionTitle и т.д.
 import 'app_theme.dart'; // Для AppColors, kiloInput
 
 

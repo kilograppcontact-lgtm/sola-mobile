@@ -16,48 +16,82 @@ class AiWorkoutPage extends StatefulWidget {
   State<AiWorkoutPage> createState() => _AiWorkoutPageState();
 }
 
-class _AiWorkoutPageState extends State<AiWorkoutPage> {
+// ДОБАВЛЕНО: with WidgetsBindingObserver
+class _AiWorkoutPageState extends State<AiWorkoutPage> with WidgetsBindingObserver {
   CameraController? _controller;
   final PoseDetector _poseDetector = PoseDetector(options: PoseDetectorOptions());
   bool _isProcessing = false;
 
-  // Логика тренировки
   int _counter = 0;
   String _feedback = "Встаньте перед камерой";
   bool _wasDown = false;
-
-  // Визуальные эффекты
-  bool _showSuccessFlash = false; // Флаг для зеленой вспышки
-  Color _statusColor = Colors.white; // Цвет текста (меняется если не видно)
+  bool _showSuccessFlash = false;
+  Color _statusColor = Colors.white;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this); // Подписываемся на события
     _initCamera();
   }
 
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this); // Отписываемся
+    _controller?.dispose();
+    _poseDetector.close();
+    super.dispose();
+  }
+
+  // ДОБАВЛЕНО: Обработка жизненного цикла
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final CameraController? cameraController = _controller;
+
+    // Если контроллер еще не создан или не инициализирован
+    if (cameraController == null || !cameraController.value.isInitialized) {
+      return;
+    }
+
+    if (state == AppLifecycleState.inactive) {
+      // Приложение сворачивается: освобождаем ресурсы
+      cameraController.dispose();
+      if(mounted) {
+        setState(() {
+          _controller = null;
+        });
+      }
+    } else if (state == AppLifecycleState.resumed) {
+      // Приложение разворачивается: инициализируем заново
+      _initCamera();
+    }
+  }
+
   Future<void> _initCamera() async {
-    final cameras = await availableCameras();
-    final frontCam = cameras.firstWhere(
-          (c) => c.lensDirection == CameraLensDirection.front,
-      orElse: () => cameras.first,
-    );
+    try {
+      final cameras = await availableCameras();
+      final frontCam = cameras.firstWhere(
+            (c) => c.lensDirection == CameraLensDirection.front,
+        orElse: () => cameras.first,
+      );
 
-    _controller = CameraController(
-      frontCam,
-      ResolutionPreset.medium, // Medium достаточно для скелета, но быстрее работает
-      enableAudio: false,
-      imageFormatGroup: Platform.isAndroid ? ImageFormatGroup.nv21 : ImageFormatGroup.bgra8888,
-    );
+      _controller = CameraController(
+        frontCam,
+        ResolutionPreset.medium,
+        enableAudio: false,
+        imageFormatGroup: Platform.isAndroid ? ImageFormatGroup.nv21 : ImageFormatGroup.bgra8888,
+      );
 
-    await _controller!.initialize();
-    if (!mounted) return;
+      await _controller!.initialize();
+      if (!mounted) return;
 
-    // Фиксируем ориентацию в портрете для корректной работы камеры
-    await _controller!.lockCaptureOrientation(DeviceOrientation.portraitUp);
+      await _controller!.lockCaptureOrientation(DeviceOrientation.portraitUp);
 
-    _controller!.startImageStream(_processImage);
-    setState(() {});
+      _controller!.startImageStream(_processImage);
+      setState(() {});
+    } catch (e) {
+      debugPrint("Camera init error: $e");
+    }
   }
 
   Future<void> _processImage(CameraImage image) async {
@@ -76,19 +110,17 @@ class _AiWorkoutPageState extends State<AiWorkoutPage> {
 
         if (mounted) {
           setState(() {
-            // Обновляем статус (если позу видно плохо - красный текст)
             _statusColor = result.isGoodPose ? Colors.white : AppColors.red;
             if (result.feedback.isNotEmpty) _feedback = result.feedback;
 
             if (result.isRep) {
-              _wasDown = true; // Зафиксировали нижнюю точку
+              _wasDown = true;
             }
-            // Засчитываем, только если встали ПОСЛЕ того как сидели
             else if (_feedback == "Встаньте прямо" && _wasDown) {
               _counter++;
               _wasDown = false;
               _feedback = "ЕСТЬ! (${_counter})";
-              _triggerSuccessEffect(); // Включаем вспышку
+              _triggerSuccessEffect();
             }
           });
         }
@@ -100,7 +132,6 @@ class _AiWorkoutPageState extends State<AiWorkoutPage> {
     }
   }
 
-  /// Запускает зеленую вспышку на экране
   void _triggerSuccessEffect() {
     setState(() => _showSuccessFlash = true);
     Timer(const Duration(milliseconds: 300), () {
@@ -142,23 +173,12 @@ class _AiWorkoutPageState extends State<AiWorkoutPage> {
   }
 
   @override
-  void dispose() {
-    _controller?.dispose();
-    _poseDetector.close();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     if (_controller == null || !_controller!.value.isInitialized) {
       return const Scaffold(backgroundColor: Colors.black, body: Center(child: CircularProgressIndicator()));
     }
 
-    // --- ИСПРАВЛЕНИЕ ПРОПОРЦИЙ КАМЕРЫ ---
     final size = MediaQuery.of(context).size;
-    // Рассчитываем масштаб, чтобы заполнить весь экран (Cover)
-    // controller.value.aspectRatio обычно выдает (width/height), например 3/4 или 4/3.
-    // Нам нужно инвертировать логику для портретного режима.
     var scale = size.aspectRatio * _controller!.value.aspectRatio;
     if (scale < 1) scale = 1 / scale;
 
@@ -167,15 +187,12 @@ class _AiWorkoutPageState extends State<AiWorkoutPage> {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          // 1. Камера с исправленным масштабом
           Transform.scale(
             scale: scale,
             child: Center(
               child: CameraPreview(_controller!),
             ),
           ),
-
-          // 2. Затемнение сверху для читаемости текста
           Positioned(
             top: 0, left: 0, right: 0,
             child: Container(
@@ -189,18 +206,14 @@ class _AiWorkoutPageState extends State<AiWorkoutPage> {
               ),
             ),
           ),
-
-          // 3. Зеленая вспышка (Оверлей успеха)
           IgnorePointer(
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 200),
               color: _showSuccessFlash
-                  ? AppColors.green.withOpacity(0.3) // Прозрачный зеленый
+                  ? AppColors.green.withOpacity(0.3)
                   : Colors.transparent,
             ),
           ),
-
-          // 4. Кнопка Закрыть
           Positioned(
             top: 50, left: 16,
             child: IconButton(
@@ -208,8 +221,6 @@ class _AiWorkoutPageState extends State<AiWorkoutPage> {
               onPressed: () => Navigator.pop(context),
             ),
           ),
-
-          // 5. Счетчик
           Positioned(
             top: 60, left: 0, right: 0,
             child: Column(
@@ -221,7 +232,7 @@ class _AiWorkoutPageState extends State<AiWorkoutPage> {
                   },
                   child: Text(
                     "$_counter",
-                    key: ValueKey<int>(_counter), // Ключ для анимации смены цифры
+                    key: ValueKey<int>(_counter),
                     style: const TextStyle(color: Colors.white, fontSize: 72, fontWeight: FontWeight.w900),
                   ),
                 ),
@@ -230,8 +241,6 @@ class _AiWorkoutPageState extends State<AiWorkoutPage> {
               ],
             ),
           ),
-
-          // 6. Фидбек (Текст по центру)
           Center(
             child: AnimatedSwitcher(
               duration: const Duration(milliseconds: 200),

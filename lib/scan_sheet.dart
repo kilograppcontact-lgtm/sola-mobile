@@ -8,10 +8,9 @@ import 'package:permission_handler/permission_handler.dart';
 import 'auth_api.dart';
 import 'app_theme.dart';
 
-/* ------------------------- SCAN SHEET (REFACTORED) ------------------------- */
+/* ------------------------- SCAN SHEET (FIXED LIFECYCLE) ------------------------- */
 
 class ScanSheet extends StatefulWidget {
-  /// Тип приема пищи, который будет выбран по умолчанию
   final String defaultMealType;
 
   const ScanSheet({
@@ -38,41 +37,48 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-
     WidgetsBinding.instance.addPostFrameCallback((_) {
-
       if (mounted) {
-
         setState(() {
           _initFuture = _initCamera();
         });
       }
     });
-
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-
-
+    // Безопасный dispose: если контроллер уже был уничтожен в lifecycle, здесь он будет null
     _controller?.dispose();
-
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    final controller = _controller;
-    if (controller == null || !controller.value.isInitialized) return;
+    final CameraController? cameraController = _controller;
+
+    // Если контроллер не инициализирован, ничего не делаем
+    if (cameraController == null || !cameraController.value.isInitialized) {
+      return;
+    }
+
     if (state == AppLifecycleState.inactive) {
-      controller.dispose();
+      // ВАЖНО: Освобождаем ресурсы и ОБНУЛЯЕМ контроллер
+      cameraController.dispose();
+      if (mounted) {
+        setState(() {
+          _controller = null;
+        });
+      }
     } else if (state == AppLifecycleState.resumed) {
+      // Восстанавливаем камеру, если мы не на экране результата
       if (_frozenPicture == null) {
         _initCamera();
       }
     }
   }
+
   Future<void> _closeSheet() async {
     if (!mounted) return;
 
@@ -85,7 +91,7 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
     } catch (e) {
       print("Ошибка при dispose() камеры: $e");
     }
-
+    // Явно обнуляем
     _controller = null;
 
     if (mounted) {
@@ -94,15 +100,27 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
   }
 
   Future<void> _initCamera() async {
-    setState(() => _busy = true);
+    // Предотвращаем повторную инициализацию, если она уже идет
+    if (_busy && _controller != null) return;
+
+    if(mounted) setState(() => _busy = true);
+
     try {
       final cams = await availableCameras();
       final back = cams.firstWhere(
             (c) => c.lensDirection == CameraLensDirection.back,
         orElse: () => cams.first,
       );
-      final ctrl = CameraController(back, ResolutionPreset.medium, imageFormatGroup: ImageFormatGroup.yuv420, enableAudio: false);
+      // Создаем новый контроллер
+      final ctrl = CameraController(
+          back,
+          ResolutionPreset.medium,
+          imageFormatGroup: ImageFormatGroup.yuv420,
+          enableAudio: false
+      );
+
       await ctrl.initialize();
+
       if (!mounted) return;
       setState(() => _controller = ctrl);
     } catch (e) {
@@ -116,14 +134,16 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
     if (_controller == null || !_controller!.value.isInitialized || _busy) return;
     try {
       setState(() => _busy = true);
+      // Если контроллер внезапно стал null (гонка потоков), вылетим в catch
       final file = await _controller!.takePicture();
 
-      // Сразу показываем UI анализа (он покажет скелетон)
       setState(() {
         _frozenPicture = file;
         _isAnalyzing = true;
         _analysisError = null;
         _busy = false;
+        // Можно поставить камеру на паузу, но лучше оставить как есть,
+        // так как мы перекрываем её картинкой
       });
 
       try {
@@ -150,7 +170,6 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
 
   Future<void> _handleSave(String mealType, Map<String, dynamic> analysisData) async {
     setState(() => _busy = true);
-
     try {
       await _api.logMeal(
         mealType: mealType,
@@ -159,11 +178,9 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
         protein: (analysisData['protein'] as num?)?.toDouble() ?? 0.0,
         fat: (analysisData['fat'] as num?)?.toDouble() ?? 0.0,
         carbs: (analysisData['carbs'] as num?)?.toDouble() ?? 0.0,
-        // Передаем анализ GPT
         analysis: analysisData['analysis']?.toString(),
       );
       if (mounted) {
-        // Успех! Возвращаем true, KiloShell обновится
         Navigator.pop(context, true);
       }
     } catch (e) {
@@ -186,6 +203,7 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
       _isAnalyzing = false;
       _analysisError = null;
     });
+    // Если контроллер был сброшен (например, уходили в фон), инициализируем заново
     if (_controller == null) {
       _initFuture = _initCamera();
     }
@@ -197,7 +215,6 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
     return Column(
       children: [
         SizedBox(height: safe.top),
-        // --- ОБЩИЙ APPBAR ---
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
           child: Row(
@@ -205,9 +222,9 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
               IconButton(
                   onPressed: _busy ? null : () {
                     if (_frozenPicture != null) {
-                      _resetScanner(); // Кнопка "Назад" на экране анализа
+                      _resetScanner();
                     } else {
-                      _closeSheet(); // Кнопка "Закрыть" на камере (теперь с await)
+                      _closeSheet();
                     }
                   },
                   icon: Icon(_frozenPicture != null ? Icons.arrow_back_rounded : Icons.close_rounded, color: Colors.white)),
@@ -217,8 +234,12 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
                 style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 18),
               ),
               const Spacer(),
-              if (_frozenPicture == null)
-                IconButton(onPressed: () => _controller?.setFlashMode(FlashMode.torch), icon: const Icon(Icons.flashlight_on_rounded, color: Colors.white), tooltip: 'Фонарик'),
+              if (_frozenPicture == null && _controller != null && _controller!.value.isInitialized)
+                IconButton(
+                    onPressed: () => _controller?.setFlashMode(FlashMode.torch),
+                    icon: const Icon(Icons.flashlight_on_rounded, color: Colors.white),
+                    tooltip: 'Фонарик'
+                ),
             ],
           ),
         ),
@@ -226,11 +247,7 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
           child: FutureBuilder(
             future: _initFuture,
             builder: (context, snapshot) {
-              // Показываем индикатор, если:
-              // 1. Future еще не был назначен (он null)
-              // 2. Future был назначен, но еще не завершился
-              final bool isLoading = _initFuture == null ||
-                  (snapshot.connectionState != ConnectionState.done);
+              final bool isLoading = _initFuture == null || (snapshot.connectionState != ConnectionState.done);
 
               if (isLoading && _frozenPicture == null) {
                 return const Center(child: CircularProgressIndicator());
@@ -238,12 +255,9 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
 
               return AnimatedSwitcher(
                 duration: const Duration(milliseconds: 400),
-                transitionBuilder: (child, animation) {
-                  return FadeTransition(opacity: animation, child: child);
-                },
                 child: _frozenPicture == null
-                    ? _buildCameraView() // ЭКРАН 1: КАМЕРА
-                    : _buildAnalysisView(), // ЭКРАН 2: РЕЗУЛЬТАТ
+                    ? _buildCameraView()
+                    : _buildAnalysisView(),
               );
             },
           ),
@@ -252,72 +266,53 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
     );
   }
 
-  /// ЭКРАН 1: Виджет Камеры
   Widget _buildCameraView() {
     return Stack(
       key: const ValueKey('camera_view'),
       fit: StackFit.expand,
       children: [
-        if (_controller?.value.isInitialized ?? false)
+        if (_controller != null && _controller!.value.isInitialized)
           Container(
             color: Colors.black,
             width: double.infinity,
             height: double.infinity,
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final ps = _controller!.value.previewSize!;
-                final previewW = ps.height;
-                final previewH = ps.width;
-                return FittedBox(
-                  fit: BoxFit.cover,
-                  child: SizedBox(width: previewW, height: previewH, child: CameraPreview(_controller!)),
-                );
-              },
-            ),
+            child: CameraPreview(_controller!),
           )
         else
-          const Center(child: Text('Камера не инициализирована', style: TextStyle(color: Colors.white))),
+          const Center(child: Text('Камера загружается...', style: TextStyle(color: Colors.white))),
 
-        // Оверлей (квадрат)
         const IgnorePointer(child: CustomPaint(painter: _OverlayPainter())),
-        // Кнопка "Сканировать"
         _buildShutterButton(),
       ],
     );
   }
 
-  /// ЭКРАН 2: Виджет Результатов Анализа
   Widget _buildAnalysisView() {
     return Stack(
       key: const ValueKey('analysis_view'),
       fit: StackFit.expand,
       children: [
-        // "Замороженное" фото на размытом фоне
         Image.file(File(_frozenPicture!.path), fit: BoxFit.cover, width: double.infinity, height: double.infinity),
         BackdropFilter(
           filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
           child: Container(color: Colors.black.withOpacity(0.5)),
         ),
-        // Оверлей с анализом (НОВЫЙ ВИДЖЕТ)
         _AnalysisResultOverlay(
           isAnalyzing: _isAnalyzing,
           analysisResult: _analysisResult,
           error: _analysisError,
           defaultMealType: widget.defaultMealType,
-          isLoading: _busy, // Передаем состояние загрузки
+          isLoading: _busy,
           onSave: (selectedMealType) {
-            // Кнопка "Сохранить" нажата
             if (_analysisResult != null) {
               _handleSave(selectedMealType, _analysisResult!);
             }
           },
-          onCancel: _resetScanner, // Кнопка "Отмена"
+          onCancel: _resetScanner,
         ),
       ],
     );
   }
-
-
 
   Widget _buildShutterButton() {
     return Align(
@@ -328,7 +323,9 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
           children: [
             Expanded(
               child: ElevatedButton.icon(
-                onPressed: _busy || !(_controller?.value.isInitialized ?? false) ? null : _takePictureAndAnalyze,
+                onPressed: _busy || _controller == null || !_controller!.value.isInitialized
+                    ? null
+                    : _takePictureAndAnalyze,
                 icon: _busy ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.camera_alt_rounded),
                 label: Text(_busy ? 'Обработка...' : 'Сканировать'),
                 style: ElevatedButton.styleFrom(
@@ -346,17 +343,15 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
   }
 }
 
-/* ------------------------- НОВЫЙ REFACTORED OVERLAY ------------------------- */
-
-
+// ... (Классы _AnalysisResultOverlay и _OverlayPainter остаются без изменений) ...
 class _AnalysisResultOverlay extends StatefulWidget {
   final bool isAnalyzing;
   final Map<String, dynamic>? analysisResult;
   final String? error;
   final String defaultMealType;
-  final bool isLoading; // Внешний индикатор загрузки (для сохранения)
-  final Function(String mealType) onSave; // Функция сохранения
-  final VoidCallback onCancel; // Функция отмены
+  final bool isLoading;
+  final Function(String mealType) onSave;
+  final VoidCallback onCancel;
 
   const _AnalysisResultOverlay({
     required this.isAnalyzing,
@@ -389,27 +384,11 @@ class _AnalysisResultOverlayState extends State<_AnalysisResultOverlay> with Sin
   void initState() {
     super.initState();
     _selectedMealType = widget.defaultMealType;
-
-    _animationController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 500),
-    );
-
-    _fadeAnimation = CurvedAnimation(
-      parent: _animationController,
-      curve: Curves.easeOutCubic,
-    );
-    _scaleAnimation = CurvedAnimation(
-      parent: _animationController,
-      curve: Curves.elasticOut, // Эффект "пружины"
-    );
-
-    // Запускаем анимацию, как только виджет готов
-    // (Небольшая задержка, чтобы фон успел размыться)
+    _animationController = AnimationController(vsync: this, duration: const Duration(milliseconds: 500));
+    _fadeAnimation = CurvedAnimation(parent: _animationController, curve: Curves.easeOutCubic);
+    _scaleAnimation = CurvedAnimation(parent: _animationController, curve: Curves.elasticOut);
     Timer(const Duration(milliseconds: 100), () {
-      if (mounted) {
-        _animationController.forward();
-      }
+      if (mounted) _animationController.forward();
     });
   }
 
@@ -421,23 +400,18 @@ class _AnalysisResultOverlayState extends State<_AnalysisResultOverlay> with Sin
 
   @override
   Widget build(BuildContext context) {
-    // Обертка для анимации
     return ScaleTransition(
       scale: _scaleAnimation,
       child: FadeTransition(
         opacity: _fadeAnimation,
-        // SingleChildScrollView, чтобы контент не вылезал при показе клавиатуры (если бы она была)
-        // и для длинного текста GPT
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(16.0),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              SizedBox(height: MediaQuery.of(context).size.height * 0.1), // Отступ сверху
-              // Центральный блок (Индикатор / Ошибка / Результат)
+              SizedBox(height: MediaQuery.of(context).size.height * 0.1),
               _buildCentralContent(),
               const SizedBox(height: 24),
-              // Нижние кнопки (Сохранить / Отмена)
               _buildActionButtons(),
               SizedBox(height: MediaQuery.of(context).padding.bottom),
             ],
@@ -447,7 +421,6 @@ class _AnalysisResultOverlayState extends State<_AnalysisResultOverlay> with Sin
     );
   }
 
-  /// Рендерит центральную карточку
   Widget _buildCentralContent() {
     if (widget.isAnalyzing) {
       return KiloCard(
@@ -480,9 +453,7 @@ class _AnalysisResultOverlayState extends State<_AnalysisResultOverlay> with Sin
         ),
       );
     }
-
     if (widget.error != null) {
-      // --- КАРТОЧКА ОШИБКИ ---
       return KiloCard(
         color: AppColors.red.withOpacity(0.1),
         borderColor: AppColors.red.withOpacity(0.3),
@@ -493,16 +464,11 @@ class _AnalysisResultOverlayState extends State<_AnalysisResultOverlay> with Sin
             SizedBox(height: 16),
             Text('Ошибка анализа', style: TextStyle(color: AppColors.neutral900, fontSize: 20, fontWeight: FontWeight.w700)),
             SizedBox(height: 8),
-            Text(
-              'Не удалось распознать блюдо. Попробуйте фото с лучшим освещением или другим ракурсом.',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: AppColors.neutral600, fontSize: 14),
-            ),
+            Text('Не удалось распознать блюдо. Попробуйте фото с лучшим освещением или другим ракурсом.', textAlign: TextAlign.center, style: TextStyle(color: AppColors.neutral600, fontSize: 14)),
           ],
         ),
       );
     }
-
     if (widget.analysisResult != null) {
       final data = widget.analysisResult!;
       final name = data['name']?.toString() ?? 'Блюдо';
@@ -510,36 +476,25 @@ class _AnalysisResultOverlayState extends State<_AnalysisResultOverlay> with Sin
       final protein = data['protein']?.toStringAsFixed(1) ?? '0.0';
       final fat = data['fat']?.toStringAsFixed(1) ?? '0.0';
       final carbs = data['carbs']?.toStringAsFixed(1) ?? '0.0';
-
       final String gptAnalysis = data['analysis']?.toString() ?? 'Анализ не предоставлен.';
       final String gptVerdict = data['verdict']?.toString() ?? 'Вердикт не предоставлен.';
 
       return KiloCard(
-        padding: EdgeInsets.zero, // Убираем padding, т.к. KiloCard его добавляет
+        padding: EdgeInsets.zero,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // 1. Название и Калории
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
               child: Column(
                 children: [
-                  Text(
-                    name,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(color: AppColors.neutral900, fontSize: 22, fontWeight: FontWeight.w900),
-                  ),
+                  Text(name, textAlign: TextAlign.center, style: const TextStyle(color: AppColors.neutral900, fontSize: 22, fontWeight: FontWeight.w900)),
                   const SizedBox(height: 16),
-                  Text(
-                    '$calories ккал',
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(color: AppColors.primary, fontSize: 36, fontWeight: FontWeight.w900),
-                  ),
+                  Text('$calories ккал', textAlign: TextAlign.center, style: const TextStyle(color: AppColors.primary, fontSize: 36, fontWeight: FontWeight.w900)),
                 ],
               ),
             ),
             const Divider(height: 1, color: AppColors.neutral200),
-            // 2. БЖУ
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 16.0),
               child: Row(
@@ -568,7 +523,6 @@ class _AnalysisResultOverlayState extends State<_AnalysisResultOverlay> with Sin
               ),
             ),
             const Divider(height: 1, color: AppColors.neutral200),
-            // 4. Селектор приема пищи
             Padding(
               padding: const EdgeInsets.all(16.0),
               child: Column(
@@ -604,17 +558,11 @@ class _AnalysisResultOverlayState extends State<_AnalysisResultOverlay> with Sin
         ),
       );
     }
-
     return Container();
   }
 
-
-
-  /// Рендерит кнопки "Отмена" и "Сохранить"
   Widget _buildActionButtons() {
-    // Если анализ еще идет или ошибка - кнопок нет
     if (widget.isAnalyzing || widget.error != null) {
-      // Показываем только кнопку "Попробовать снова"
       if (widget.error != null) {
         return SizedBox(
           width: double.infinity,
@@ -632,8 +580,6 @@ class _AnalysisResultOverlayState extends State<_AnalysisResultOverlay> with Sin
       }
       return const SizedBox.shrink();
     }
-
-    // Рендерим кнопки, если все ОК
     return Row(
       children: [
         Expanded(
@@ -672,15 +618,11 @@ class _AnalysisResultOverlayState extends State<_AnalysisResultOverlay> with Sin
       children: [
         Text(label, style: const TextStyle(color: AppColors.neutral600, fontSize: 13, fontWeight: FontWeight.w500)),
         const SizedBox(height: 4),
-        Text(
-          '${value}г',
-          style: TextStyle(color: color, fontSize: 20, fontWeight: FontWeight.w800),
-        ),
+        Text('${value}г', style: TextStyle(color: color, fontSize: 20, fontWeight: FontWeight.w800)),
       ],
     );
   }
 }
-
 
 class _OverlayPainter extends CustomPainter {
   const _OverlayPainter();
@@ -693,24 +635,17 @@ class _OverlayPainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = 3;
     final width = size.width * 0.8;
-    // Квадратный фокус
     final height = width;
     final left = (size.width - width) / 2;
     final top = (size.height - height) / 2 - 24;
-    final rrect = RRect.fromRectAndRadius(
-      Rect.fromLTWH(left, top, width, height),
-      const Radius.circular(16),
-    );
+    final rrect = RRect.fromRectAndRadius(Rect.fromLTWH(left, top, width, height), const Radius.circular(16));
     final layerBounds = Offset.zero & size;
     canvas.saveLayer(layerBounds, Paint());
     canvas.drawRect(layerBounds, overlay);
     canvas.drawRRect(rrect, clear);
     canvas.restore();
     canvas.drawRRect(rrect, stroke);
-    final mark = Paint()
-      ..color = Colors.white
-      ..strokeWidth = 4
-      ..style = PaintingStyle.stroke;
+    final mark = Paint()..color = Colors.white..strokeWidth = 4..style = PaintingStyle.stroke;
     const len = 18.0;
     canvas.drawLine(Offset(left, top), Offset(left + len, top), mark);
     canvas.drawLine(Offset(left, top), Offset(left, top + len), mark);
@@ -721,7 +656,6 @@ class _OverlayPainter extends CustomPainter {
     canvas.drawLine(Offset(left + width, top + height), Offset(left + width - len, top + height), mark);
     canvas.drawLine(Offset(left + width, top + height), Offset(left + width, top + height - len), mark);
   }
-
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }

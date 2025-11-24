@@ -1,7 +1,7 @@
 name: kilograpp
 description: "A new Flutter project."
 publish_to: 'none'
-version: 1.0.0+6
+version: 1.0.0+7
 
 environment:
   sdk: ^3.0.0 # Я изменил на 3.0.0, так как 3.9.2 еще не существует (текущая стабильная версия ~3.6). Если у вас спец. версия, верните как было.
@@ -12,7 +12,7 @@ dependencies:
 
   # Основные библиотеки
   mobile_scanner: ^6.0.0
-  camera: ^0.10.5+9
+  camera: ^0.11.0+2
   google_mlkit_commons: ^0.9.0
   google_mlkit_pose_detection: ^0.13.0
   permission_handler: ^11.3.1

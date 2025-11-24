@@ -8,7 +8,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'auth_api.dart';
 import 'app_theme.dart';
 
-/* ------------------------- SCAN SHEET (FIXED LIFECYCLE) ------------------------- */
+/* ------------------------- SCAN SHEET (FIXED) ------------------------- */
 
 class ScanSheet extends StatefulWidget {
   final String defaultMealType;
@@ -49,7 +49,7 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    // Безопасный dispose: если контроллер уже был уничтожен в lifecycle, здесь он будет null
+    // Важно: проверяем, жив ли контроллер, перед удалением
     _controller?.dispose();
     super.dispose();
   }
@@ -64,15 +64,15 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
     }
 
     if (state == AppLifecycleState.inactive) {
-      // ВАЖНО: Освобождаем ресурсы и ОБНУЛЯЕМ контроллер
+      // ПРИ СВОРАЧИВАНИИ: Освобождаем ресурсы и ОБНУЛЯЕМ ссылку
       cameraController.dispose();
       if (mounted) {
         setState(() {
-          _controller = null;
+          _controller = null; // <--- КРИТИЧЕСКИ ВАЖНО
         });
       }
     } else if (state == AppLifecycleState.resumed) {
-      // Восстанавливаем камеру, если мы не на экране результата
+      // ПРИ РАЗВОРАЧИВАНИИ: Инициализируем заново, если не на экране результата
       if (_frozenPicture == null) {
         _initCamera();
       }
@@ -91,7 +91,7 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
     } catch (e) {
       print("Ошибка при dispose() камеры: $e");
     }
-    // Явно обнуляем
+    // Явно обнуляем, чтобы избежать двойного вызова
     _controller = null;
 
     if (mounted) {
@@ -100,10 +100,10 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
   }
 
   Future<void> _initCamera() async {
-    // Предотвращаем повторную инициализацию, если она уже идет
+    // Не инициализируем, если уже заняты или контроллер есть
     if (_busy && _controller != null) return;
 
-    if(mounted) setState(() => _busy = true);
+    if (mounted) setState(() => _busy = true);
 
     try {
       final cams = await availableCameras();
@@ -111,7 +111,7 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
             (c) => c.lensDirection == CameraLensDirection.back,
         orElse: () => cams.first,
       );
-      // Создаем новый контроллер
+
       final ctrl = CameraController(
           back,
           ResolutionPreset.medium,
@@ -134,7 +134,7 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
     if (_controller == null || !_controller!.value.isInitialized || _busy) return;
     try {
       setState(() => _busy = true);
-      // Если контроллер внезапно стал null (гонка потоков), вылетим в catch
+
       final file = await _controller!.takePicture();
 
       setState(() {
@@ -142,8 +142,7 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
         _isAnalyzing = true;
         _analysisError = null;
         _busy = false;
-        // Можно поставить камеру на паузу, но лучше оставить как есть,
-        // так как мы перекрываем её картинкой
+        // Камеру не останавливаем, она просто перекрывается картинкой
       });
 
       try {
@@ -203,7 +202,7 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
       _isAnalyzing = false;
       _analysisError = null;
     });
-    // Если контроллер был сброшен (например, уходили в фон), инициализируем заново
+    // Если контроллер был уничтожен (например, уходили в фон), восстанавливаем
     if (_controller == null) {
       _initFuture = _initCamera();
     }
@@ -343,7 +342,7 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
   }
 }
 
-// ... (Классы _AnalysisResultOverlay и _OverlayPainter остаются без изменений) ...
+// ... (Остальные виджеты _AnalysisResultOverlay и _OverlayPainter без изменений) ...
 class _AnalysisResultOverlay extends StatefulWidget {
   final bool isAnalyzing;
   final Map<String, dynamic>? analysisResult;

@@ -31,13 +31,13 @@ class _AiWorkoutPageState extends State<AiWorkoutPage> with WidgetsBindingObserv
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this); // Подписываемся на события
+    WidgetsBinding.instance.addObserver(this); // ПОДПИСКА НА СОБЫТИЯ
     _initCamera();
   }
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this); // Отписываемся
+    WidgetsBinding.instance.removeObserver(this); // ОТПИСКА
     _controller?.dispose();
     _poseDetector.close();
     super.dispose();
@@ -54,7 +54,7 @@ class _AiWorkoutPageState extends State<AiWorkoutPage> with WidgetsBindingObserv
     }
 
     if (state == AppLifecycleState.inactive) {
-      // Приложение сворачивается: освобождаем ресурсы
+      // Приложение сворачивается: освобождаем ресурсы и обнуляем
       cameraController.dispose();
       if(mounted) {
         setState(() {

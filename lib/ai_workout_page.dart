@@ -16,11 +16,12 @@ class AiWorkoutPage extends StatefulWidget {
   State<AiWorkoutPage> createState() => _AiWorkoutPageState();
 }
 
-// ДОБАВЛЕНО: with WidgetsBindingObserver
 class _AiWorkoutPageState extends State<AiWorkoutPage> with WidgetsBindingObserver {
   CameraController? _controller;
   final PoseDetector _poseDetector = PoseDetector(options: PoseDetectorOptions());
   bool _isProcessing = false;
+  // Добавляем флаг, чтобы не инициализировать камеру дважды
+  bool _isCameraInitializing = false;
 
   int _counter = 0;
   String _feedback = "Встаньте перед камерой";
@@ -31,43 +32,57 @@ class _AiWorkoutPageState extends State<AiWorkoutPage> with WidgetsBindingObserv
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this); // ПОДПИСКА НА СОБЫТИЯ
+    WidgetsBinding.instance.addObserver(this);
     _initCamera();
   }
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this); // ОТПИСКА
-    _controller?.dispose();
+    WidgetsBinding.instance.removeObserver(this);
+    _disposeCamera(); // Выносим логику очистки в отдельный метод
     _poseDetector.close();
     super.dispose();
   }
 
-  // ДОБАВЛЕНО: Обработка жизненного цикла
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final CameraController? cameraController = _controller;
 
-    // Если контроллер еще не создан или не инициализирован
-    if (cameraController == null || !cameraController.value.isInitialized) {
-      return;
-    }
-
-    if (state == AppLifecycleState.inactive) {
-      // Приложение сворачивается: освобождаем ресурсы и обнуляем
-      cameraController.dispose();
-      if(mounted) {
-        setState(() {
-          _controller = null;
-        });
-      }
+    if (state == AppLifecycleState.inactive || state == AppLifecycleState.paused) {
+      // При уходе в фон СРОЧНО освобождаем ресурсы
+      _disposeCamera();
     } else if (state == AppLifecycleState.resumed) {
-      // Приложение разворачивается: инициализируем заново
-      _initCamera();
+      // При возврате инициализируем заново
+      if (cameraController == null || !cameraController.value.isInitialized) {
+        _initCamera();
+      }
+    }
+  }
+
+  /// Безопасная очистка камеры
+  Future<void> _disposeCamera() async {
+    if (_controller == null) return;
+
+    final CameraController cameraController = _controller!;
+    _controller = null; // Сразу обнуляем ссылку, чтобы UI не пытался рендерить
+
+    if (mounted) setState(() {});
+
+    try {
+      // ВАЖНО: Если был запущен поток изображений, его нужно остановить
+      if (cameraController.value.isStreamingImages) {
+        await cameraController.stopImageStream();
+      }
+      await cameraController.dispose();
+    } catch (e) {
+      debugPrint('Ошибка при освобождении камеры: $e');
     }
   }
 
   Future<void> _initCamera() async {
+    if (_isCameraInitializing || _controller != null) return;
+    _isCameraInitializing = true;
+
     try {
       final cameras = await availableCameras();
       final frontCam = cameras.firstWhere(
@@ -75,27 +90,38 @@ class _AiWorkoutPageState extends State<AiWorkoutPage> with WidgetsBindingObserv
         orElse: () => cameras.first,
       );
 
-      _controller = CameraController(
+      final controller = CameraController(
         frontCam,
         ResolutionPreset.medium,
         enableAudio: false,
         imageFormatGroup: Platform.isAndroid ? ImageFormatGroup.nv21 : ImageFormatGroup.bgra8888,
       );
 
-      await _controller!.initialize();
-      if (!mounted) return;
+      await controller.initialize();
 
-      await _controller!.lockCaptureOrientation(DeviceOrientation.portraitUp);
+      // Если пока мы инициализировали, виджет уже умер - выходим
+      if (!mounted) {
+        return;
+      }
 
-      _controller!.startImageStream(_processImage);
-      setState(() {});
+      await controller.lockCaptureOrientation(DeviceOrientation.portraitUp);
+
+      // Запускаем стрим
+      await controller.startImageStream(_processImage);
+
+      setState(() {
+        _controller = controller;
+      });
     } catch (e) {
       debugPrint("Camera init error: $e");
+    } finally {
+      _isCameraInitializing = false;
     }
   }
 
   Future<void> _processImage(CameraImage image) async {
-    if (_isProcessing) return;
+    // Если контроллер уже null (мы ушли с экрана), не обрабатываем
+    if (_isProcessing || _controller == null) return;
     _isProcessing = true;
 
     try {
@@ -126,11 +152,14 @@ class _AiWorkoutPageState extends State<AiWorkoutPage> with WidgetsBindingObserv
         }
       }
     } catch (e) {
-      debugPrint("Error: $e");
+      debugPrint("Error processing image: $e");
     } finally {
       _isProcessing = false;
     }
   }
+
+  // ... (Методы _triggerSuccessEffect, _inputImageFromCameraImage, _concatenatePlanes, build - БЕЗ ИЗМЕНЕНИЙ)
+  // Скопируйте их из вашего предыдущего файла, они корректны.
 
   void _triggerSuccessEffect() {
     setState(() => _showSuccessFlash = true);
@@ -140,7 +169,9 @@ class _AiWorkoutPageState extends State<AiWorkoutPage> with WidgetsBindingObserv
   }
 
   InputImage? _inputImageFromCameraImage(CameraImage image) {
+    // Важная проверка на null
     if (_controller == null) return null;
+
     final camera = _controller!.description;
     final sensorOrientation = camera.sensorOrientation;
 
@@ -193,6 +224,7 @@ class _AiWorkoutPageState extends State<AiWorkoutPage> with WidgetsBindingObserv
               child: CameraPreview(_controller!),
             ),
           ),
+          // Градиент сверху
           Positioned(
             top: 0, left: 0, right: 0,
             child: Container(
@@ -206,6 +238,7 @@ class _AiWorkoutPageState extends State<AiWorkoutPage> with WidgetsBindingObserv
               ),
             ),
           ),
+          // Вспышка успеха
           IgnorePointer(
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 200),
@@ -214,6 +247,7 @@ class _AiWorkoutPageState extends State<AiWorkoutPage> with WidgetsBindingObserv
                   : Colors.transparent,
             ),
           ),
+          // Кнопка закрытия
           Positioned(
             top: 50, left: 16,
             child: IconButton(
@@ -221,6 +255,7 @@ class _AiWorkoutPageState extends State<AiWorkoutPage> with WidgetsBindingObserv
               onPressed: () => Navigator.pop(context),
             ),
           ),
+          // Счетчик
           Positioned(
             top: 60, left: 0, right: 0,
             child: Column(
@@ -241,6 +276,7 @@ class _AiWorkoutPageState extends State<AiWorkoutPage> with WidgetsBindingObserv
               ],
             ),
           ),
+          // Фидбек
           Center(
             child: AnimatedSwitcher(
               duration: const Duration(milliseconds: 200),

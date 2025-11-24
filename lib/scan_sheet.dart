@@ -4,11 +4,10 @@ import 'dart:ui' show ImageFilter;
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-import 'package:permission_handler/permission_handler.dart';
 import 'auth_api.dart';
 import 'app_theme.dart';
 
-/* ------------------------- SCAN SHEET (FIXED) ------------------------- */
+/* ------------------------- SCAN SHEET (SAFE & FIXED) ------------------------- */
 
 class ScanSheet extends StatefulWidget {
   final String defaultMealType;
@@ -37,6 +36,7 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // Запускаем инициализацию после построения первого кадра
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         setState(() {
@@ -49,7 +49,7 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    // Важно: проверяем, жив ли контроллер, перед удалением
+    // Пытаемся освободить, если вдруг еще жив
     _controller?.dispose();
     super.dispose();
   }
@@ -58,21 +58,22 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final CameraController? cameraController = _controller;
 
-    // Если контроллер не инициализирован, ничего не делаем
-    if (cameraController == null || !cameraController.value.isInitialized) {
-      return;
-    }
-
-    if (state == AppLifecycleState.inactive) {
-      // ПРИ СВОРАЧИВАНИИ: Освобождаем ресурсы и ОБНУЛЯЕМ ссылку
-      cameraController.dispose();
-      if (mounted) {
-        setState(() {
-          _controller = null; // <--- КРИТИЧЕСКИ ВАЖНО
-        });
+    // Приложение уходит в фон (или шторка уведомлений)
+    if (state == AppLifecycleState.inactive || state == AppLifecycleState.paused) {
+      if (cameraController != null && cameraController.value.isInitialized) {
+        // 1. Сначала отвязываем контроллер от UI, чтобы не было обращений к мертвой ссылке
+        if (mounted) {
+          setState(() {
+            _controller = null;
+          });
+        }
+        // 2. Асинхронно освобождаем ресурсы
+        cameraController.dispose();
       }
-    } else if (state == AppLifecycleState.resumed) {
-      // ПРИ РАЗВОРАЧИВАНИИ: Инициализируем заново, если не на экране результата
+    }
+    // Приложение возвращается
+    else if (state == AppLifecycleState.resumed) {
+      // Если мы на экране камеры (не на результате) и контроллера нет — создаем
       if (_frozenPicture == null) {
         _initCamera();
       }
@@ -82,17 +83,22 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
   Future<void> _closeSheet() async {
     if (!mounted) return;
 
+    // Блокируем UI
     setState(() {
       _busy = true;
     });
 
-    try {
-      await _controller?.dispose();
-    } catch (e) {
-      print("Ошибка при dispose() камеры: $e");
-    }
-    // Явно обнуляем, чтобы избежать двойного вызова
+    // Сохраняем ссылку локально и зануляем глобально
+    final controllerToDispose = _controller;
     _controller = null;
+
+    if (controllerToDispose != null) {
+      try {
+        await controllerToDispose.dispose();
+      } catch (e) {
+        debugPrint("Ошибка при dispose() камеры: $e");
+      }
+    }
 
     if (mounted) {
       Navigator.pop(context);
@@ -100,13 +106,14 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
   }
 
   Future<void> _initCamera() async {
-    // Не инициализируем, если уже заняты или контроллер есть
-    if (_busy && _controller != null) return;
+    // Если контроллер уже есть или идет процесс — выходим
+    if (_controller != null || _busy) return;
 
     if (mounted) setState(() => _busy = true);
 
     try {
       final cams = await availableCameras();
+      // Ищем заднюю камеру, или берем первую попавшуюся
       final back = cams.firstWhere(
             (c) => c.lensDirection == CameraLensDirection.back,
         orElse: () => cams.first,
@@ -121,28 +128,39 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
 
       await ctrl.initialize();
 
-      if (!mounted) return;
+      if (!mounted) {
+        // Если виджет умер пока мы инициализировали — убиваем контроллер
+        await ctrl.dispose();
+        return;
+      }
+
+      // Успех
       setState(() => _controller = ctrl);
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка камеры: $e')));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка камеры: $e')));
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
   Future<void> _takePictureAndAnalyze() async {
-    if (_controller == null || !_controller!.value.isInitialized || _busy) return;
+    final ctrl = _controller;
+    if (ctrl == null || !ctrl.value.isInitialized || _busy) return;
+
     try {
       setState(() => _busy = true);
 
-      final file = await _controller!.takePicture();
+      // Делаем снимок
+      final file = await ctrl.takePicture();
 
       setState(() {
         _frozenPicture = file;
         _isAnalyzing = true;
         _analysisError = null;
         _busy = false;
-        // Камеру не останавливаем, она просто перекрывается картинкой
+        // Камеру на паузу не ставим, просто перекрываем UI
       });
 
       try {
@@ -162,8 +180,10 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
         }
       }
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не удалось сделать снимок: $e')));
-      setState(() => _busy = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не удалось сделать снимок: $e')));
+        setState(() => _busy = false);
+      }
     }
   }
 
@@ -202,7 +222,7 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
       _isAnalyzing = false;
       _analysisError = null;
     });
-    // Если контроллер был уничтожен (например, уходили в фон), восстанавливаем
+    // Если контроллер был уничтожен (например, уходили в фон), инициализируем заново
     if (_controller == null) {
       _initFuture = _initCamera();
     }
@@ -233,10 +253,20 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
                 style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 18),
               ),
               const Spacer(),
+              // Фонарик только если камера активна и мы не на экране результата
               if (_frozenPicture == null && _controller != null && _controller!.value.isInitialized)
                 IconButton(
-                    onPressed: () => _controller?.setFlashMode(FlashMode.torch),
-                    icon: const Icon(Icons.flashlight_on_rounded, color: Colors.white),
+                    onPressed: () {
+                      try {
+                        final mode = _controller!.value.flashMode == FlashMode.torch ? FlashMode.off : FlashMode.torch;
+                        _controller!.setFlashMode(mode);
+                        setState(() {}); // Обновляем иконку
+                      } catch (_) {}
+                    },
+                    icon: Icon(
+                        _controller!.value.flashMode == FlashMode.torch ? Icons.flashlight_off_rounded : Icons.flashlight_on_rounded,
+                        color: Colors.white
+                    ),
                     tooltip: 'Фонарик'
                 ),
             ],
@@ -246,10 +276,11 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
           child: FutureBuilder(
             future: _initFuture,
             builder: (context, snapshot) {
-              final bool isLoading = _initFuture == null || (snapshot.connectionState != ConnectionState.done);
-
-              if (isLoading && _frozenPicture == null) {
-                return const Center(child: CircularProgressIndicator());
+              // Если инициализация еще идет или контроллера нет
+              if (_controller == null || !_controller!.value.isInitialized) {
+                // Если есть замороженная картинка - показываем её, иначе лоадер
+                if (_frozenPicture != null) return _buildAnalysisView();
+                return const Center(child: CircularProgressIndicator(color: Colors.white));
               }
 
               return AnimatedSwitcher(
@@ -266,20 +297,21 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
   }
 
   Widget _buildCameraView() {
+    // Доп. защита: если контроллер null, не рендерим Preview
+    if (_controller == null || !_controller!.value.isInitialized) {
+      return const SizedBox.shrink();
+    }
+
     return Stack(
       key: const ValueKey('camera_view'),
       fit: StackFit.expand,
       children: [
-        if (_controller != null && _controller!.value.isInitialized)
-          Container(
-            color: Colors.black,
-            width: double.infinity,
-            height: double.infinity,
-            child: CameraPreview(_controller!),
-          )
-        else
-          const Center(child: Text('Камера загружается...', style: TextStyle(color: Colors.white))),
-
+        Container(
+          color: Colors.black,
+          width: double.infinity,
+          height: double.infinity,
+          child: CameraPreview(_controller!),
+        ),
         const IgnorePointer(child: CustomPaint(painter: _OverlayPainter())),
         _buildShutterButton(),
       ],
@@ -287,6 +319,8 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
   }
 
   Widget _buildAnalysisView() {
+    if (_frozenPicture == null) return const SizedBox.shrink();
+
     return Stack(
       key: const ValueKey('analysis_view'),
       fit: StackFit.expand,
@@ -325,7 +359,7 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
                 onPressed: _busy || _controller == null || !_controller!.value.isInitialized
                     ? null
                     : _takePictureAndAnalyze,
-                icon: _busy ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.camera_alt_rounded),
+                icon: _busy ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)) : const Icon(Icons.camera_alt_rounded),
                 label: Text(_busy ? 'Обработка...' : 'Сканировать'),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: AppColors.primary,
@@ -342,7 +376,6 @@ class _ScanSheetState extends State<ScanSheet> with WidgetsBindingObserver {
   }
 }
 
-// ... (Остальные виджеты _AnalysisResultOverlay и _OverlayPainter без изменений) ...
 class _AnalysisResultOverlay extends StatefulWidget {
   final bool isAnalyzing;
   final Map<String, dynamic>? analysisResult;
@@ -425,13 +458,13 @@ class _AnalysisResultOverlayState extends State<_AnalysisResultOverlay> with Sin
       return KiloCard(
         child: Column(
           children: [
-            Skeleton(height: 40, width: double.infinity, radius: 0),
+            const Skeleton(height: 40, width: double.infinity, radius: 0),
             Padding(
               padding: const EdgeInsets.all(20.0),
               child: Column(
                 children: [
                   const SizedBox(height: 12),
-                  Skeleton(height: 36, width: 120, radius: 18),
+                  const Skeleton(height: 36, width: 120, radius: 18),
                   const SizedBox(height: 24),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceAround,
@@ -442,9 +475,9 @@ class _AnalysisResultOverlayState extends State<_AnalysisResultOverlay> with Sin
                     ],
                   ),
                   const SizedBox(height: 24),
-                  Skeleton(height: 16, width: double.infinity, radius: 4),
+                  const Skeleton(height: 16, width: double.infinity, radius: 4),
                   const SizedBox(height: 8),
-                  Skeleton(height: 16, width: 180, radius: 4),
+                  const Skeleton(height: 16, width: 180, radius: 4),
                 ],
               ),
             ),
